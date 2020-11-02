@@ -232,7 +232,7 @@ struct function_traits<T, Return_t(Args...), std::enable_if_t<!fits_small_storag
 			// destroy
 			[](storage_t* src) 
 			{
-				src->template get_static<T>().~T();
+				delete src->template get_dynamic<T>();
 			}
 		};
 
