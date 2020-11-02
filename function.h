@@ -9,7 +9,7 @@ struct function;
 template <typename Return_t, typename... Args>
 struct function<Return_t (Args...)>
 {
-	using storage_t = storage<Return_t(Args...)>;
+	using storage_t = function_details::storage<Return_t(Args...)>;
 
 	function() = default;
 
