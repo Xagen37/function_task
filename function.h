@@ -1,6 +1,5 @@
 #pragma once
 #include "traits.h"
-#include <memory>
 
 
 template <typename F>
@@ -15,83 +14,51 @@ struct function<Return_t (Args...)>
 
 	function(const function& other)
 	{
-		if (!other)
-		{
-			stg = std::unique_ptr<storage_t>(nullptr);
-		}
-		else
-		{
-			if (!stg.get())
-			{
-				stg = std::unique_ptr<storage_t>(new storage_t());
-			}
-			other.stg->get_desc()->copy(other.stg.get(), stg.get());
-		}
+		other.stg.get_desc()->copy(&other.stg, &stg);
 	}
 
 	function(function&& other) noexcept
 	{
-		if (!other)
-		{
-			stg = std::unique_ptr<storage_t>(nullptr);
-		}
-		else
-		{
-			if (!stg.get())
-			{
-				stg = std::unique_ptr<storage_t>(new storage_t());
-			}
-			other.stg->get_desc()->move(other.stg.get(), stg.get());
-		}
+		other.stg.get_desc()->move(&other.stg, &stg);
 	}
 	
     template <typename T>
 	function(T val)
-		: stg(std::make_unique <storage_t> (std::move(val)))
+		: stg(std::move(val))
 	{}
 
 	function& operator=(function const& rhs)
 	{
 		if (this != &rhs)
 		{
-			if (!rhs)
-			{
-				stg.reset();
-			}
-			else
-			{
-				if (!stg.get())
-				{
-					stg = std::unique_ptr<storage_t>(new storage_t());
-				}
-				rhs.stg->get_desc()->copy(rhs.stg.get(), stg.get());
-			}
+			storage_t temp_copy;
+			rhs.stg.get_desc()->copy(&rhs.stg, &temp_copy);
+
+			stg.get_desc()->destroy(&stg);
+			temp_copy.get_desc()->move(&temp_copy, &stg);
 		}
 		
 		return *this;
 	}
 	function& operator=(function&& rhs) noexcept
 	{
-		stg.swap(rhs.stg);
-
+		if (this != &rhs)
+		{
+			stg.get_desc()->destroy(&stg);
+			rhs.stg.get_desc()->move(&rhs.stg, &stg);
+		}
+		
 		return *this;
 	}
 
 	explicit operator bool() const noexcept
 	{
-		return stg.get();
+		return static_cast<bool>(stg);
 	}
 
 	Return_t operator()(Args... args) const
 	{
-		if (!stg.get())
-		{
-			throw bad_function_call();
-		}
-		else
-		{
-			return stg->invoke(std::forward<Args>(args)...);
-		}
+		return stg.invoke(std::forward<Args>(args)...);
 	}
 
     template <typename T>
@@ -99,7 +66,7 @@ struct function<Return_t (Args...)>
 	{
 		if (*this)
 		{
-			return stg->template get_dynamic<T>();
+			return const_cast<T*>(static_cast<const function<Return_t(Args...)> *>(this)->template target<T>());
 		}
 		else
 		{
@@ -112,7 +79,7 @@ struct function<Return_t (Args...)>
 	{
 		if (*this)
 		{
-			return stg->template get_dynamic<T>();
+			return stg.template target<T>();
 		}
 		else
 		{
@@ -121,5 +88,5 @@ struct function<Return_t (Args...)>
 	}
 
 private:
-	std::unique_ptr<storage_t> stg;
+	storage_t stg;
 };

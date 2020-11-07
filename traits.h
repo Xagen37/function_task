@@ -1,7 +1,7 @@
-#include <type_traits>
-#include <cstddef>
-#include <utility>
+#pragma once
 #include <exception>
+#include <type_traits>
+
 
 constexpr static size_t INPLACE_BUFFER_SIZE = sizeof(void*);
 constexpr static size_t INPLACE_BUFFER_ALIGNMENT = alignof(void*);
@@ -27,18 +27,52 @@ struct bad_function_call : std::exception
 namespace function_details
 {
 	template <typename Sign>
-	struct type_descriptor;
-
-	template <typename T, typename Sign, typename = void>
-	struct function_traits;
-
-	template <typename Sign>
 	struct storage;
 
 	template <typename Return_t, typename... Args>
-	struct storage<Return_t(Args...)>
+	struct type_descriptor
+	{
+		using storage_t = storage<Return_t(Args...)>;
+
+		void (*copy)(const storage_t* src, storage_t* dest);
+		void (*move)(storage_t* src, storage_t* dest);
+		Return_t(*invoke)(const storage_t* src, Args...);
+		void (*destroy)(storage_t*);
+	};
+
+	template <typename Return_t, typename... Args>
+	type_descriptor <Return_t, Args...> const* empty_type_descriptor()
+	{
+		using storage_t = storage <Return_t(Args...)>;
+
+		constexpr static type_descriptor <Return_t, Args...> impl =
+		{
+			[](storage_t const* src, storage_t* dest)
+			{
+				dest->set_desc(src->get_desc());
+			},
+			[](storage_t* src, storage_t* dest)
+			{
+				dest->set_desc(src->get_desc());
+			},
+			[](const storage_t* src, Args...) -> Return_t
+			{
+				throw bad_function_call();
+			},
+			[](storage_t*) {}
+		};
+
+		return &impl;
+	}
+
+	template <typename T, typename = void>
+	struct function_traits;
+
+	template <typename Return_t, typename... Args>
+	struct storage <Return_t(Args...)>
 	{
 		storage()
+			: descriptor(empty_type_descriptor<Return_t, Args...>())
 		{}
 
 		template<typename T>
@@ -50,9 +84,9 @@ namespace function_details
 			}
 			else
 			{
-				reinterpret_cast<T*&>(buffer) = new std::remove_reference_t<T>(std::forward<T>(val));
+				function_traits<T>::initialize_storage(this, std::move(val));
 			}
-			set_desc(function_traits<T, Return_t(Args...)>::get_type_descriptor());
+			set_desc(function_traits<T>::template get_type_descriptor<Return_t, Args...>());
 		}
 
 		~storage()
@@ -60,30 +94,21 @@ namespace function_details
 			descriptor->destroy(this);
 		}
 
+		explicit operator bool() const noexcept
+		{
+			return descriptor != empty_type_descriptor <Return_t, Args...>();
+		}
+
 		template <typename T>
 		T& get_static() noexcept
 		{
-			if constexpr (fits_small_storage<T>)
-			{
-				return reinterpret_cast<T&>(buffer);
-			}
-			else
-			{
-				return *(reinterpret_cast<T * const&>(buffer));
-			}
+			return reinterpret_cast<T&>(buffer);
 		}
 
 		template <typename T>
 		const T& get_static() const noexcept
 		{
-			if constexpr (fits_small_storage<T>)
-			{
-				return reinterpret_cast<const T&>(buffer);
-			}
-			else
-			{
-				return *(reinterpret_cast<const T * const&>(buffer));
-			}
+			return reinterpret_cast<const T&>(buffer);
 		}
 
 		void set_dynamic(void* value) noexcept
@@ -92,17 +117,24 @@ namespace function_details
 		}
 
 		template <typename T>
-		T* get_dynamic() noexcept
+		T* get_dynamic() const noexcept
 		{
-			return const_cast<T*>(static_cast <const storage*>(this)->template get_dynamic<T>());
+			return reinterpret_cast<T* const&>(buffer);
 		}
 
 		template <typename T>
-		const T* get_dynamic() const noexcept
+		T const* target() const noexcept
 		{
-			if (function_traits<T, Return_t(Args...)>::get_type_descriptor() == descriptor)
+			if (function_traits<T>::template get_type_descriptor<Return_t, Args...>() == descriptor)
 			{
-				return &(get_static<T>());
+				if constexpr (fits_small_storage<T>)
+				{
+					return &get_static<T>();
+				}
+				else
+				{
+					return get_dynamic<T>();
+				}
 			}
 			else
 			{
@@ -110,7 +142,7 @@ namespace function_details
 			}
 		}
 
-		Return_t invoke(Args&& ... args)
+		Return_t invoke(Args&& ... args) const
 		{
 			return descriptor->invoke(this, std::forward<Args>(args)...);
 		}
@@ -125,117 +157,113 @@ namespace function_details
 			return buffer;
 		}
 
-		const type_descriptor<Return_t(Args...)>* get_desc() const
+		const type_descriptor<Return_t, Args...>* get_desc() const
 		{
 			return descriptor;
 		}
 
-		void set_desc(const type_descriptor<Return_t(Args...)>* other_desc)
+		void set_desc(const type_descriptor<Return_t, Args...>* other_desc)
 		{
 			descriptor = other_desc;
 		}
 
 	private:
 		inplace_buffer buffer;
-		const type_descriptor<Return_t(Args...)>* descriptor;
+		const type_descriptor<Return_t, Args...>* descriptor;
 	};
 
-	template <typename Return_t, typename... Args>
-	struct type_descriptor <Return_t(Args...)>
+	template <typename T>
+	struct function_traits <T, std::enable_if_t<fits_small_storage<T>>>
 	{
-		using storage_t = storage<Return_t(Args...)>;
-
-		void (*copy)(const storage_t* src, storage_t* dest);
-		void (*move)(storage_t* src, storage_t* dest);
-		Return_t(*invoke)(storage_t* src, Args...);
-		void (*destroy)(storage_t*);
-	};
-
-	template <typename T, typename Return_t, typename... Args>
-	struct function_traits <T, Return_t(Args...), std::enable_if_t<fits_small_storage<T>>>
-	{
-		static const type_descriptor <Return_t(Args...)>* get_type_descriptor() noexcept
+		template <typename Return_t, typename... Args>
+		static const type_descriptor <Return_t, Args...>* get_type_descriptor() noexcept
 		{
 			using storage_t = storage <Return_t(Args...)>;
 
-			constexpr static type_descriptor <Return_t(Args...)> impl =
+			constexpr static type_descriptor <Return_t, Args...> impl =
 			{
 				// Copy
 				[](const storage_t* src, storage_t* dest)
 				{
-					auto& f = src->template get_static<T>();
-					new(&(dest->get_buffer())) T(f);
+					new (&(dest->get_buffer())) T(src->template get_static<T>());
 					dest->set_desc(src->get_desc());
 				},
 
 				// move
 				[](storage_t* src, storage_t* dest)
 				{
-					new(&(dest->get_buffer())) T(std::move(src->template get_static<T>()));
+					new (&(dest->get_buffer())) T(std::move(src->template get_static<T>()));
 					dest->set_desc(src->get_desc());
+					src->set_desc(empty_type_descriptor<Return_t, Args...>());
 				},
 
-					// invoke
-					[](storage_t* src, Args... args) -> Return_t
-					{
-						return src->template get_static<T>()(std::forward<Args>(args)...);
-					},
+				// invoke
+				[](const storage_t* src, Args... args) -> Return_t
+				{
+					return src->template get_static<T>()(std::forward<Args>(args)...);
+				},
 
-					// destroy
-					[](storage_t* src)
-					{
-						src->template get_static<T>().~T();
-					}
+				// destroy
+				[](storage_t* src)
+				{
+					src->template get_static<T>().~T();
+					src->set_desc(empty_type_descriptor<Return_t, Args...>());
+				}
 			};
 
 			return &impl;
 		}
 	};
 
-	template <typename T, typename Return_t, typename... Args>
-	struct function_traits<T, Return_t(Args...), std::enable_if_t<!fits_small_storage<T>>>
+	template <typename T>
+	struct function_traits<T, std::enable_if_t<!fits_small_storage<T>>>
 	{
-		static void initialize_storage(storage <Return_t(Args...)>& src, T&& obj)
+		template <typename Return_t, typename... Args>
+		static void initialize_storage(storage <Return_t(Args...)>* src, T&& obj)
 		{
-			src.set_dynamic(new T(std::move(obj)));
+			src->set_dynamic(new T(std::move(obj)));
 		}
 
-		static void initialize_storage(storage <Return_t(Args...)>& src, const T& obj)
+		template <typename Return_t, typename... Args>
+		static void set_storage(storage <Return_t(Args...)>* src, T* val)
 		{
-			src.set_dynamic(new T(obj));
+			src->set_dynamic(val);
 		}
 
-		static const type_descriptor <Return_t(Args...)>* get_type_descriptor() noexcept
+		template <typename Return_t, typename... Args>
+		static const type_descriptor <Return_t, Args...>* get_type_descriptor() noexcept
 		{
 			using storage_t = storage <Return_t(Args...)>;
 
-			constexpr static type_descriptor <Return_t(Args...)> impl =
+			constexpr static type_descriptor <Return_t, Args...> impl =
 			{
 				// Copy
 				[](const storage_t* src, storage_t* dest)
 				{
-					initialize_storage(*dest, src->template get_static<T>());
+					set_storage(dest, new T(*src->template get_dynamic<T>()));
 					dest->set_desc(src->get_desc());
 				},
 
 				// move
 				[](storage_t* src, storage_t* dest)
 				{
-					initialize_storage(*dest, src->template get_static<T>());
+					set_storage(dest, src->template get_dynamic<T>());
 					dest->set_desc(src->get_desc());
+					src->set_desc(empty_type_descriptor<Return_t, Args...>());
 				},
 
-					// invoke
-					[](storage_t* src, Args... args)
-					{
-						return src->template get_static<T>()(std::forward<Args>(args)...);
-					},
+				// invoke
+				[](const storage_t* src, Args... args)
+				{
+					return (*src->template get_dynamic<T>())(std::forward<Args>(args)...);
+				},
 
-					// destroy
-					[](storage_t* src)
-					{
-						delete src->template get_dynamic<T>();
-					}
+				// destroy
+				[](storage_t* src)
+				{
+					delete src->template get_dynamic<T>();
+					src->set_desc(empty_type_descriptor<Return_t, Args...>());
+				}
 			};
 
 			return &impl;
